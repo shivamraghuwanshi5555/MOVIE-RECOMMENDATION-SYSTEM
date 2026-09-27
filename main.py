@@ -71,6 +71,26 @@ def get_keywords_and_business(movie_id):
     return keywords, budget, revenue
 
 
+@st.cache_data(ttl=86400)
+def get_trailer_url(movie_id):
+    """Movie ka YouTube trailer (ya na mile to teaser) URL TMDB se nikalta hai."""
+    if not movie_id:
+        return None
+    url = f"{BASE_URL}/movie/{int(movie_id)}/videos"
+    params = {"api_key": API_KEY, "language": "en-US"}
+    response = safe_get(url, params)
+    if response is None:
+        return None
+
+    videos = response.json().get("results", [])
+    # Pehle official "Trailer" dhundo, warna "Teaser" chalega
+    for video_type in ["Trailer", "Teaser"]:
+        for v in videos:
+            if v.get("site") == "YouTube" and v.get("type") == video_type:
+                return f"https://www.youtube.com/watch?v={v['key']}"
+    return None
+
+
 def get_verdict(budget, revenue):
     """Budget vs revenue ke hisaab se Hit/Superhit/Flop verdict nikalta hai."""
     if not budget or not revenue:
@@ -195,6 +215,7 @@ def fetch_movies():
             movie_info = basic_movies[i]
             all_movies[i] = {
                 "title": movie_info["title"],
+                "movie_id": movie_info["movie_id"],
                 "genre": movie_info["genre"],
                 "keywords": keywords,
                 "poster_url": movie_info["poster_url"],
@@ -208,6 +229,59 @@ def fetch_movies():
             }
 
     return pd.DataFrame(all_movies)
+
+
+def find_movie_id_by_title(title, release_date):
+    """Title (aur agar mile to release year) se TMDB search karke best-match movie_id deta hai."""
+    url = f"{BASE_URL}/search/movie"
+    params = {"api_key": API_KEY, "query": title, "language": "en-US"}
+    response = safe_get(url, params)
+    if response is None:
+        return None
+
+    results = response.json().get("results", [])
+    if not results:
+        return None
+
+    year = None
+    if isinstance(release_date, str) and len(release_date) >= 4:
+        year = release_date[:4]
+
+    if year:
+        for r in results:
+            if r.get("release_date", "").startswith(year):
+                return r.get("id")
+
+    return results[0].get("id")
+
+
+def migrate_movie_id_if_needed():
+    """Purani movies.csv mein movie_id missing ho to ek baar backfill kar deta hai (trailer feature ke liye)."""
+    if not os.path.exists("movies.csv"):
+        return
+
+    df = pd.read_csv("movies.csv")
+
+    if "movie_id" not in df.columns:
+        df["movie_id"] = None
+
+    missing_mask = df["movie_id"].isna()
+    missing_rows = df[missing_mask]
+
+    if missing_rows.empty:
+        return
+
+    with st.spinner(f"Trailers ke liye {len(missing_rows)} movies update ho rahi hain (ek hi baar hoga)..."):
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_index = {
+                executor.submit(find_movie_id_by_title, row["title"], row.get("release_date", "")): idx
+                for idx, row in missing_rows.iterrows()
+            }
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                df.at[idx, "movie_id"] = future.result()
+
+        df.to_csv("movies.csv", index=False)
 
 
 def ensure_dataset():
@@ -291,7 +365,8 @@ st.set_page_config(
 # Netflix-jaisa dark theme + red accents + mobile polish + custom fonts ke liye CSS
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@600;700&family=Poppins:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Poppins:wght@400;500;600&display=swap');
+
     html, body, [class*="css"] {
         font-family: 'Poppins', sans-serif;
     }
@@ -304,8 +379,8 @@ st.markdown("""
     }
     h1 {
         color: #e50914 !important;
-        font-family: 'Oswald', sans-serif !important;
-        font-weight: 700 !important;
+        font-family: 'Bebas Neue', sans-serif !important;
+        font-weight: 400 !important;
         font-size: 3rem !important;
         letter-spacing: 2px;
     }
@@ -327,6 +402,23 @@ st.markdown("""
         }
         h3 {
             font-size: 1.1rem !important;
+        }
+
+        /* Columns ko neeche stack hone se roko - row mein hi rakho, bas chhoti kar do */
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: nowrap !important;
+            gap: 4px !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            flex: 1 1 0 !important;
+            width: auto !important;
+            min-width: 0 !important;
+        }
+        div[data-testid="stCaptionContainer"] {
+            font-size: 10px !important;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
     }
 
@@ -380,6 +472,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 ensure_dataset()
+migrate_movie_id_if_needed()
 movies, similarity = load_data()
 
 # ---------- Hero Banner (top posters ka collage) ----------
@@ -402,7 +495,7 @@ if hero_posters:
     )
     st.markdown(hero_html, unsafe_allow_html=True)
 
-st.image("logo.svg", use_container_width=True)
+st.title("🎬 Movie Recommender")
 
 
 def render_movie_card(col, movie_row, key_prefix, idx):
@@ -468,6 +561,13 @@ if selected_title:
                     st.markdown(f"**Verdict:** {m['verdict']}")
                 if m.get("overview"):
                     st.markdown(f"**Overview:** {m['overview']}")
+
+            if m.get("movie_id") and str(m.get("movie_id")) != "nan":
+                trailer_url = get_trailer_url(m["movie_id"])
+                if trailer_url:
+                    st.markdown("**🎬 Trailer**")
+                    st.video(trailer_url)
+
             if st.button("✕ Close"):
                 st.query_params.clear()
                 st.rerun()
