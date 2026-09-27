@@ -279,11 +279,21 @@ def get_recommendations(movie, movies, similarity):
 # PART 3: Streamlit UI
 # ==========================================
 
-st.set_page_config(page_title="Movie Recommender", layout="wide")
+st.set_page_config(
+    page_title="Movie Recommender - Bollywood, Hollywood & South Movies",
+    page_icon="🎬",
+    layout="wide"
+)
 
-# Netflix-jaisa dark theme + red accents ke liye custom CSS
+# Netflix-jaisa dark theme + red accents + mobile polish + custom fonts ke liye CSS
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Poppins:wght@400;500;600&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Poppins', sans-serif;
+    }
+
     .stApp {
         background-color: #000000;
     }
@@ -292,36 +302,77 @@ st.markdown("""
     }
     h1 {
         color: #e50914 !important;
-        font-weight: 800 !important;
+        font-family: 'Bebas Neue', sans-serif !important;
+        font-weight: 400 !important;
+        font-size: 3rem !important;
+        letter-spacing: 2px;
     }
+    h3 {
+        font-family: 'Bebas Neue', sans-serif !important;
+        letter-spacing: 1px;
+        color: #ffffff !important;
+    }
+
+    /* Mobile ke liye title aur spacing chhota kar do */
+    @media (max-width: 640px) {
+        h1 {
+            font-size: 1.6rem !important;
+        }
+        .block-container {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            padding-top: 1.5rem !important;
+        }
+        h3 {
+            font-size: 1.1rem !important;
+        }
+    }
+
     div[data-testid="stSelectbox"] > div > div {
         background-color: #2b2b2b;
         color: white;
         border: 1px solid #3d3d3d;
+        border-radius: 6px;
     }
+
     .stButton > button {
         background-color: #e50914;
         color: white;
         border: none;
-        border-radius: 4px;
+        border-radius: 6px;
         font-weight: 600;
-        padding: 0.5rem 1.5rem;
+        padding: 0.6rem 1.5rem;
+        width: 100%;
+        min-height: 44px;   /* touch-friendly size mobile ke liye */
     }
     .stButton > button:hover {
         background-color: #f6121d;
         color: white;
     }
+
     div[data-testid="stImage"] img {
-        border-radius: 6px;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
         transition: transform 0.2s ease;
     }
     div[data-testid="stImage"] img:hover {
         transform: scale(1.05);
     }
+
     div[data-testid="stCaptionContainer"] {
         color: #e5e5e5 !important;
         text-align: center;
         font-weight: 500;
+        margin-top: 4px;
+    }
+
+    /* Columns ke beech thoda gap aur neeche spacing */
+    div[data-testid="column"] {
+        padding: 4px;
+    }
+
+    hr {
+        border-color: #2b2b2b !important;
     }
 </style>
 """, unsafe_allow_html=True)

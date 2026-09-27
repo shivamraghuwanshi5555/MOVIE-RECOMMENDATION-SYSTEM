@@ -47,7 +47,7 @@ On the first run, the app fetches movies from TMDB (this takes a little time) an
 ## Live Demo
 
 <!-- Add your Streamlit Cloud link here after deploying -->
-[Live App](your-streamlit-link-here)
+[Live App](https://movie-recommendation-system-z8jkzzobmivgkzflhfedtp.streamlit.app/)
 
 ## Screenshots
 
