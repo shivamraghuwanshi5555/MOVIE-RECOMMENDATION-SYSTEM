@@ -1,5 +1,5 @@
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import requests
 import time
@@ -248,15 +248,15 @@ def load_data():
         + movies["keywords"].astype(str)
     )
 
-    cv = CountVectorizer()
-    vectors = cv.fit_transform(movies["tags"])
+    tfidf = TfidfVectorizer(stop_words="english")
+    vectors = tfidf.fit_transform(movies["tags"])
     similarity = cosine_similarity(vectors)
 
     return movies, similarity
 
 
-def get_recommendations(movie, movies, similarity):
-    """Movie ka naam leke top-5 recommended movies (rows) return karta hai."""
+def get_recommendations(movie, movies, similarity, top_n=15):
+    """Movie ka naam leke searched movie + top-N similar movies (rows) return karta hai."""
     movie = movie.lower()
     titles = movies["title"].str.lower()
 
@@ -270,9 +270,12 @@ def get_recommendations(movie, movies, similarity):
         list(enumerate(distances)),
         reverse=True,
         key=lambda x: x[1]
-    )[1:6]
+    )[1:top_n + 1]
 
-    return [movies.iloc[i] for i, _ in movie_list]
+    searched_movie = movies.iloc[index]
+    recommended = [movies.iloc[i] for i, _ in movie_list]
+
+    return searched_movie, recommended
 
 
 # ==========================================
@@ -288,8 +291,7 @@ st.set_page_config(
 # Netflix-jaisa dark theme + red accents + mobile polish + custom fonts ke liye CSS
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Poppins:wght@400;500;600&display=swap');
-
+    @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@600;700&family=Poppins:wght@400;500;600&display=swap');
     html, body, [class*="css"] {
         font-family: 'Poppins', sans-serif;
     }
@@ -302,8 +304,8 @@ st.markdown("""
     }
     h1 {
         color: #e50914 !important;
-        font-family: 'Bebas Neue', sans-serif !important;
-        font-weight: 400 !important;
+        font-family: 'Oswald', sans-serif !important;
+        font-weight: 700 !important;
         font-size: 3rem !important;
         letter-spacing: 2px;
     }
@@ -377,28 +379,64 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎬 Movie Recommender")
-
 ensure_dataset()
 movies, similarity = load_data()
 
+# ---------- Hero Banner (top posters ka collage) ----------
+hero_posters = movies["poster_url"].dropna()
+hero_posters = hero_posters[hero_posters != ""].head(8).tolist()
+
+if hero_posters:
+    hero_images_html = "".join(
+        f'<img src="{url}" style="flex:1 1 0; min-width:0; height:100%; width:100%; '
+        f'object-fit:cover; opacity:0.55;">'
+        for url in hero_posters
+    )
+    hero_html = (
+        f'<div style="position:relative; width:100%; height:150px; overflow:hidden; '
+        f'border-radius:10px; margin-bottom:1.2rem;">'
+        f'<div style="display:flex; gap:2px; height:100%; width:100%;">{hero_images_html}</div>'
+        f'<div style="position:absolute; inset:0; '
+        f'background:linear-gradient(180deg, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.85) 90%);"></div>'
+        f'</div>'
+    )
+    st.markdown(hero_html, unsafe_allow_html=True)
+
+st.image("logo.svg", use_container_width=True)
+
 
 def render_movie_card(col, movie_row, key_prefix, idx):
-    """Ek movie card banata hai — poster pe click karne se details khulti hain."""
+    """Ek movie card banata hai — poster pe click karne se details khulti hain, rating badge ke saath."""
     with col:
         title = movie_row.get("title", "")
         poster_url = movie_row.get("poster_url", "")
+        rating = movie_row.get("rating", "")
+
+        rating_badge = ""
+        if rating and str(rating) != "nan":
+            try:
+                rating_val = float(rating)
+                if rating_val > 0:
+                    rating_badge = (
+                        f'<div style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.75); '
+                        f'color:#f5c518; font-size:11px; font-weight:600; padding:2px 6px; '
+                        f'border-radius:4px; font-family:\'Poppins\', sans-serif;">⭐ {rating_val:.1f}</div>'
+                    )
+            except (ValueError, TypeError):
+                pass
 
         if poster_url:
-            st.markdown(
-                f"""
-                <a href="?selected={quote(title)}" target="_self" style="text-decoration: none;">
-                    <img src="{poster_url}" style="width:100%; border-radius:6px; transition: transform 0.2s ease; cursor: pointer;"
-                         onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
-                </a>
-                """,
-                unsafe_allow_html=True
+            card_html = (
+                f'<div style="position:relative;">'
+                f'<a href="?selected={quote(title)}" target="_self" style="text-decoration: none;">'
+                f'<img src="{poster_url}" style="width:100%; display:block; border-radius:8px; '
+                f'transition: transform 0.2s ease; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5);" '
+                f'onmouseover="this.style.transform=\'scale(1.05)\'" onmouseout="this.style.transform=\'scale(1)\'">'
+                f'</a>'
+                f'{rating_badge}'
+                f'</div>'
             )
+            st.markdown(card_html, unsafe_allow_html=True)
         st.caption(title)
 
 
@@ -437,23 +475,33 @@ if selected_title:
 
 # ---------- Search + Recommend (ab sabse upar) ----------
 movie_name = st.selectbox(
-    "Ek movie choose karo:",
+    "🍿 What are you in the mood to watch? Type a movie below 🎥✨",
     options=sorted(movies["title"].dropna().unique())
 )
 
-searched = st.button("Recommend")
+searched = st.button("🔍 Find Similar Movies")
 
 if searched:
-    results = get_recommendations(movie_name, movies, similarity)
+    result = get_recommendations(movie_name, movies, similarity, top_n=15)
 
-    if results is None:
+    if result is None:
         st.error("Ye movie dataset mein nahi mili!")
     else:
-        st.subheader("Recommended Movies")
-        cols = st.columns(5)
+        searched_movie, recommended = result
 
-        for idx, (col, movie_row) in enumerate(zip(cols, results)):
-            render_movie_card(col, movie_row, "rec", idx)
+        st.markdown("#### 🎯 Your Pick")
+        pick_cols = st.columns(5)
+        render_movie_card(pick_cols[0], searched_movie, "picked", 0)
+
+        st.markdown("---")
+
+        st.markdown("#### ✨ Because You Watched This — 15 Similar Movies")
+        rec_rows = [recommended[i:i + 5] for i in range(0, len(recommended), 5)]
+
+        for row_idx, row_movies in enumerate(rec_rows):
+            row_cols = st.columns(5)
+            for col_idx, movie_row in enumerate(row_movies):
+                render_movie_card(row_cols[col_idx], movie_row, "rec", f"{row_idx}_{col_idx}")
 
 else:
     # ---------- Trending Now — Bollywood, Hollywood, South alag-alag ----------
