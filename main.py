@@ -7,6 +7,8 @@ import os
 import streamlit as st
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote, unquote
+import html as html_lib
+import base64
 
 
 # ==========================================
@@ -91,9 +93,60 @@ def get_trailer_url(movie_id):
     return None
 
 
-def get_verdict(budget, revenue):
-    """Budget vs revenue ke hisaab se Hit/Superhit/Flop verdict nikalta hai."""
-    if not budget or not revenue:
+@st.cache_data(ttl=86400)
+def get_movie_extras(movie_id):
+    """Cast + Where-to-Watch (India) ek hi TMDB call mein nikalta hai."""
+    empty = {"cast": [], "providers": [], "provider_type": "", "link": ""}
+    if not movie_id:
+        return empty
+    url = f"{BASE_URL}/movie/{int(movie_id)}"
+    params = {"api_key": API_KEY, "append_to_response": "credits,watch/providers"}
+    response = safe_get(url, params)
+    if response is None:
+        return empty
+
+    data = response.json()
+
+    cast = [
+        {
+            "name": c.get("name", ""),
+            "character": c.get("character", ""),
+            "photo": f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get("profile_path") else "",
+        }
+        for c in data.get("credits", {}).get("cast", [])[:10]
+    ]
+
+    india = data.get("watch/providers", {}).get("results", {}).get("IN", {})
+    providers, provider_type = [], ""
+    # Pehle stream (subscription), fir rent, fir buy
+    for key, label in [("flatrate", "Stream"), ("rent", "Rent"), ("buy", "Buy")]:
+        if india.get(key):
+            providers = [
+                {"name": p.get("provider_name", ""),
+                 "logo": f"https://image.tmdb.org/t/p/w92{p['logo_path']}" if p.get("logo_path") else ""}
+                for p in india[key]
+            ]
+            provider_type = label
+            break
+
+    return {"cast": cast, "providers": providers, "provider_type": provider_type, "link": india.get("link", "")}
+
+
+def get_verdict(budget, revenue, release_date=None):
+    """Budget vs revenue se verdict. Data bharosemand na ho to 'N/A' deta hai (galat label se behtar)."""
+    try:
+        budget = float(budget)
+        revenue = float(revenue)
+    except (TypeError, ValueError):
+        return "N/A"
+
+    # TMDB mein kayi movies ka budget/collection missing ya placeholder hota hai (jaise $1000)
+    if budget < 500_000 or revenue < 500_000:
+        return "N/A"
+
+    # Abhi theatre mein chal rahi (ya release nahi hui) movie ka collection adhoora hota hai
+    release_dt = pd.to_datetime(release_date, errors="coerce")
+    if pd.notna(release_dt) and release_dt > pd.Timestamp.today() - pd.Timedelta(days=60):
         return "N/A"
 
     ratio = revenue / budget
@@ -224,7 +277,7 @@ def fetch_movies():
                 "rating": movie_info["rating"],
                 "budget": budget,
                 "revenue": revenue,
-                "verdict": get_verdict(budget, revenue),
+                "verdict": get_verdict(budget, revenue, movie_info["release_date"]),
                 "industry": movie_info["industry"]
             }
 
@@ -279,8 +332,12 @@ def migrate_movie_id_if_needed():
             }
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
-                df.at[idx, "movie_id"] = future.result()
+                found_id = future.result()
+                # Agar match nahi mila to 0 save karo (NaN nahi) - warna ye row har
+                # rerun pe "missing" dikhti rahegi aur baar-baar retry hoti rahegi.
+                df.at[idx, "movie_id"] = found_id if found_id else 0
 
+        df["movie_id"] = df["movie_id"].astype("Int64")
         df.to_csv("movies.csv", index=False)
 
 
@@ -309,8 +366,13 @@ def load_data():
         movies["budget"] = movies["budget"].fillna(0)
     if "revenue" in movies.columns:
         movies["revenue"] = movies["revenue"].fillna(0)
-    if "verdict" in movies.columns:
-        movies["verdict"] = movies["verdict"].fillna("N/A")
+    if "budget" in movies.columns and "revenue" in movies.columns:
+        # CSV ka purana verdict ignore karke naye rules se dobara nikalo
+        movies["verdict"] = movies.apply(
+            lambda r: get_verdict(r["budget"], r["revenue"], r.get("release_date", "")), axis=1
+        )
+    else:
+        movies["verdict"] = "N/A"
     if "industry" in movies.columns:
         movies["industry"] = movies["industry"].fillna("Hollywood")
     else:
@@ -404,21 +466,17 @@ st.markdown("""
             font-size: 1.1rem !important;
         }
 
-        /* Columns ko neeche stack hone se roko - row mein hi rakho, bas chhoti kar do */
-        div[data-testid="stHorizontalBlock"] {
-            flex-wrap: nowrap !important;
-            gap: 4px !important;
+        /* Details panel (poster + info) mobile pe thoda chhota */
+        .st-key-movie-detail div[data-testid="stHorizontalBlock"] {
+            gap: 10px !important;
         }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-            flex: 1 1 0 !important;
-            width: auto !important;
-            min-width: 0 !important;
+
+        .movie-card {
+            width: 100px !important;
         }
-        div[data-testid="stCaptionContainer"] {
-            font-size: 10px !important;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+
+        .app-logo {
+            width: 140px !important;
         }
     }
 
@@ -453,16 +511,101 @@ st.markdown("""
         transform: scale(1.05);
     }
 
-    div[data-testid="stCaptionContainer"] {
-        color: #e5e5e5 !important;
+    /* ---------- Horizontal-scroll poster row (OTT app jaisi) ---------- */
+    .movie-row {
+        display: flex;
+        overflow-x: auto;
+        gap: 10px;
+        padding: 4px 2px 14px 2px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .movie-row::-webkit-scrollbar {
+        display: none;
+    }
+    .movie-card {
+        flex: 0 0 auto;
+        width: 130px;
+        cursor: pointer;
+    }
+    .movie-card a {
+        text-decoration: none;
+    }
+    .movie-card img {
+        width: 100%;
+        display: block;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        transition: transform 0.15s ease;
+    }
+    .movie-card img:hover {
+        transform: scale(1.04);
+    }
+    .movie-card-title {
+        color: #e5e5e5;
         text-align: center;
         font-weight: 500;
         margin-top: 4px;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .rating-badge {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        background: rgba(0,0,0,0.75);
+        color: #f5c518;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 4px;
     }
 
-    /* Columns ke beech thoda gap aur neeche spacing */
-    div[data-testid="column"] {
-        padding: 4px;
+    /* ---------- Cast row ---------- */
+    .cast-card {
+        flex: 0 0 auto;
+        width: 84px;
+        text-align: center;
+    }
+    .cast-card img, .cast-card .cast-ph {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        object-fit: cover;
+        margin: 0 auto;
+        display: block;
+        background: #2b2b2b;
+    }
+    .cast-name {
+        color: #e5e5e5;
+        font-size: 11px;
+        font-weight: 600;
+        margin-top: 4px;
+        line-height: 1.2;
+    }
+    .cast-role {
+        color: #9a9a9a;
+        font-size: 10px;
+        line-height: 1.2;
+    }
+
+    /* ---------- Where to watch logos ---------- */
+    .provider-logo {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        margin-right: 8px;
+    }
+
+    /* ---------- Logo: laptop pe bada, mobile pe chhota ---------- */
+    .app-logo {
+        width: 260px;
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin-bottom: 0.5rem;
     }
 
     hr {
@@ -495,15 +638,33 @@ if hero_posters:
     )
     st.markdown(hero_html, unsafe_allow_html=True)
 
-st.title("🎬 Movie Recommender")
 
 
-def render_movie_card(col, movie_row, key_prefix, idx):
-    """Ek movie card banata hai — poster pe click karne se details khulti hain, rating badge ke saath."""
-    with col:
+def show_logo():
+    """logo.svg dikhata hai (laptop/mobile size CSS se). File na mile to purana text title dikhata hai."""
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.svg")
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        st.markdown(f'<img class="app-logo" src="data:image/svg+xml;base64,{b64}">', unsafe_allow_html=True)
+    else:
+        st.title("🎬 Movie Recommender")
+
+
+show_logo()
+
+
+def render_movie_row(movies_rows):
+    """Poori row ek hi HTML block mein banata hai jo side-ways scroll hoti hai (OTT app jaisi)."""
+    cards_html = []
+
+    for movie_row in movies_rows:
         title = movie_row.get("title", "")
         poster_url = movie_row.get("poster_url", "")
         rating = movie_row.get("rating", "")
+
+        if not poster_url:
+            continue
 
         rating_badge = ""
         if rating and str(rating) != "nan":
@@ -511,26 +672,25 @@ def render_movie_card(col, movie_row, key_prefix, idx):
                 rating_val = float(rating)
                 if rating_val > 0:
                     rating_badge = (
-                        f'<div style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.75); '
-                        f'color:#f5c518; font-size:11px; font-weight:600; padding:2px 6px; '
-                        f'border-radius:4px; font-family:\'Poppins\', sans-serif;">⭐ {rating_val:.1f}</div>'
+                        f'<div class="rating-badge">⭐ {rating_val:.1f}</div>'
                     )
             except (ValueError, TypeError):
                 pass
 
-        if poster_url:
-            card_html = (
-                f'<div style="position:relative;">'
-                f'<a href="?selected={quote(title)}" target="_self" style="text-decoration: none;">'
-                f'<img src="{poster_url}" style="width:100%; display:block; border-radius:8px; '
-                f'transition: transform 0.2s ease; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5);" '
-                f'onmouseover="this.style.transform=\'scale(1.05)\'" onmouseout="this.style.transform=\'scale(1)\'">'
-                f'</a>'
-                f'{rating_badge}'
-                f'</div>'
-            )
-            st.markdown(card_html, unsafe_allow_html=True)
-        st.caption(title)
+        cards_html.append(
+            f'<div class="movie-card">'
+            f'<div style="position:relative;">'
+            f'<a href="?selected={quote(title)}" target="_self">'
+            f'<img src="{poster_url}">'
+            f'</a>'
+            f'{rating_badge}'
+            f'</div>'
+            f'<div class="movie-card-title">{title}</div>'
+            f'</div>'
+        )
+
+    row_html = f'<div class="movie-row">{"".join(cards_html)}</div>'
+    st.markdown(row_html, unsafe_allow_html=True)
 
 
 # ---------- Details panel (jab kisi movie ke poster pe click kiya jaaye) ----------
@@ -544,7 +704,8 @@ if selected_title:
         m = match.iloc[0]
         with st.container():
             st.markdown("### 🎬 " + m.get("title", ""))
-            detail_cols = st.columns([1, 2])
+            with st.container(key="movie-detail"):
+                detail_cols = st.columns([1, 2])
             with detail_cols[0]:
                 if m.get("poster_url"):
                     st.image(m["poster_url"], use_container_width=True)
@@ -559,14 +720,48 @@ if selected_title:
                     st.markdown(f"**Box Office Collection:** {format_inr(m['revenue'])}")
                 if m.get("verdict") and m.get("verdict") != "N/A":
                     st.markdown(f"**Verdict:** {m['verdict']}")
+                    st.caption("Verdict TMDB ke budget aur collection se nikala gaya hai, kabhi kabhi adhoora ho sakta hai.")
                 if m.get("overview"):
                     st.markdown(f"**Overview:** {m['overview']}")
 
-            if m.get("movie_id") and str(m.get("movie_id")) != "nan":
+            if m.get("movie_id") and str(m.get("movie_id")) not in ("nan", "0"):
                 trailer_url = get_trailer_url(m["movie_id"])
+                st.markdown("**🎬 Trailer**")
                 if trailer_url:
-                    st.markdown("**🎬 Trailer**")
                     st.video(trailer_url)
+                else:
+                    st.caption("Is movie ka trailer TMDB pe available nahi hai.")
+
+            extras = get_movie_extras(m["movie_id"]) if m.get("movie_id") and str(m.get("movie_id")) not in ("nan", "0") else None
+
+            if extras:
+                # ---------- Where to Watch ----------
+                st.markdown("**📺 Where to Watch (India)**")
+                if extras["providers"]:
+                    logos = "".join(
+                        f'<img class="provider-logo" src="{p["logo"]}" title="{html_lib.escape(p["name"])}">'
+                        for p in extras["providers"] if p["logo"]
+                    )
+                    st.markdown(f'<div>{logos}</div>', unsafe_allow_html=True)
+                    st.caption(f"{extras['provider_type']} options · Data by JustWatch")
+                else:
+                    st.caption("India mein abhi kisi platform pe available nahi hai. · Data by JustWatch")
+
+                # ---------- Cast ----------
+                if extras["cast"]:
+                    st.markdown("**🎭 Cast**")
+                    cast_html = ""
+                    for c in extras["cast"]:
+                        photo = (
+                            f'<img src="{c["photo"]}">' if c["photo"]
+                            else '<div class="cast-ph"></div>'
+                        )
+                        cast_html += (
+                            f'<div class="cast-card">{photo}'
+                            f'<div class="cast-name">{html_lib.escape(c["name"])}</div>'
+                            f'<div class="cast-role">{html_lib.escape(c["character"])}</div></div>'
+                        )
+                    st.markdown(f'<div class="movie-row">{cast_html}</div>', unsafe_allow_html=True)
 
             if st.button("✕ Close"):
                 st.query_params.clear()
@@ -590,31 +785,65 @@ if searched:
         searched_movie, recommended = result
 
         st.markdown("#### 🎯 Your Pick")
-        pick_cols = st.columns(5)
-        render_movie_card(pick_cols[0], searched_movie, "picked", 0)
+        render_movie_row([searched_movie])
 
         st.markdown("---")
 
-        st.markdown("#### ✨ Because You Watched This — 15 Similar Movies")
-        rec_rows = [recommended[i:i + 5] for i in range(0, len(recommended), 5)]
-
-        for row_idx, row_movies in enumerate(rec_rows):
-            row_cols = st.columns(5)
-            for col_idx, movie_row in enumerate(row_movies):
-                render_movie_card(row_cols[col_idx], movie_row, "rec", f"{row_idx}_{col_idx}")
+        st.markdown("#### ✨ Because You Watched This")
+        render_movie_row(recommended)
 
 else:
-    # ---------- Trending Now — Bollywood, Hollywood, South alag-alag ----------
+    # ---------- Genre chips (All / Romance / Drama ...) ----------
+    GENRE_CHIPS = ["All", "Action", "Comedy", "Drama", "Romance", "Thriller", "Horror",
+                   "Animation", "Crime", "Family", "Fantasy", "Science Fiction"]
+
+    if hasattr(st, "pills"):
+        chosen = st.pills("Genre", GENRE_CHIPS, default="All", label_visibility="collapsed")
+    else:
+        chosen = st.radio("Genre", GENRE_CHIPS, horizontal=True, label_visibility="collapsed")
+    chosen = chosen or "All"
+
+    if chosen == "All":
+        view = movies
+    else:
+        view = movies[movies["genre"].str.contains(chosen, case=False, na=False)]
+
+    with_poster = view[view["poster_url"] != ""].copy()
+    with_poster["rating_num"] = pd.to_numeric(with_poster["rating"], errors="coerce")
+    with_poster["release_dt"] = pd.to_datetime(with_poster["release_date"], errors="coerce")
+
+    # ---------- 1) Top Rated ----------
+    top_rated = with_poster.sort_values("rating_num", ascending=False).head(15)
+
+    if not top_rated.empty:
+        st.markdown("#### ⭐ Top Rated")
+        render_movie_row([row for _, row in top_rated.iterrows()])
+
+    # ---------- 2) New Releases (aaj tak release hui, sabse nayi pehle) ----------
+    new_releases = (
+        with_poster[with_poster["release_dt"] <= pd.Timestamp.today()]
+        .sort_values("release_dt", ascending=False)
+        .head(15)
+    )
+
+    if not new_releases.empty:
+        st.markdown("#### 🆕 New Releases")
+        render_movie_row([row for _, row in new_releases.iterrows()])
+
+    # ---------- 3) Bollywood, Hollywood, South ----------
     st.subheader("🔥 Trending Now")
 
+    shown_any = False
     for industry_label, emoji in [("Bollywood", "🇮🇳"), ("Hollywood", "🎥"), ("South", "🎬")]:
-        industry_movies = movies[movies["industry"] == industry_label].head(5)
+        # Pehle poster wali movies chuno, phir top 10 lo (warna bina-poster movies row khali chhod deti hain)
+        industry_movies = with_poster[with_poster["industry"] == industry_label].head(10)
 
         if industry_movies.empty:
             continue
 
+        shown_any = True
         st.markdown(f"#### {emoji} {industry_label}")
-        row_cols = st.columns(5)
+        render_movie_row([row for _, row in industry_movies.iterrows()])
 
-        for i, (_, movie_row) in enumerate(industry_movies.iterrows()):
-            render_movie_card(row_cols[i], movie_row, f"trend_{industry_label}", i)
+    if not shown_any:
+        st.info("Is genre ki koi movie nahi mili.")
